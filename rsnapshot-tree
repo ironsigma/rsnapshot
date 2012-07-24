@@ -1,0 +1,162 @@
+#!/usr/bin/env python
+# rsnapshot-tree - Reformat the output of rsnapshot-diff to a foldable Vim text file.
+# Copyright (C) 2009  Juan D Frias <juandfrias@gmail.com>
+# 
+# This program is free software; you can redistribute it and/or
+# modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation; either version 2
+# of the License, or (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+# or visit http://www.gnu.org/licenses/gpl-2.0.html
+
+import getopt
+import sys
+import re
+
+class Script:
+        """The main class to run the script"""
+
+        def __init__(self, argv):
+                self._parse_args(argv)
+
+        def usage(self):
+                """Print the usage"""
+                name = 'rsnapshot-tree'
+                print """%(name)s - Convert rsnapshot diff to tree v0.1\n\n  Usage: %(name)s file""" % vars()
+
+        def _parse_args(self, argv):
+                # parse the options
+                try:
+                        opts, lastargs = getopt.getopt(argv[1:],"h")
+
+                # on error show usage
+                except:
+                        print (sys.exc_info())[1]
+                        self.usage()
+                        sys.exit(0)
+
+                # check each options
+                for opt, arg in opts:
+                        if opt == '-h':
+                                self.usage()
+                                sys.exit(0)
+                        else:
+                                self.usage()
+                                sys.exit(0)
+
+                # check for input file
+                if len(lastargs) == 1:
+                        self._infile = lastargs[0]
+                else:
+                        self.usage()
+                        sys.exit(0)
+
+        def _parse_file(self):
+                # init dictionary holding the files
+                self._files = {}
+
+                # use stdin or file if specified
+                infile = sys.stdin if self._infile == '-' else open(self._infile)
+
+                pattern = re.compile('^Comparing (.+?) to (.+)$')
+                left = None
+                right = None
+
+                # read each line
+                for line in infile:
+
+                        # remove new line
+                        line = line.rstrip()
+
+                        # skip headers and footers
+                        match = pattern.match(line)
+                        if match:
+                                left = match.group(1)
+                                right = match.group(2)
+
+                        elif line[0:8] == 'Between ' or line[-7:] == ' bytes;':
+                                continue
+
+                        # look for added or removed files
+                        elif line[0:1] in ('+', '-'):
+                                idx =  3 + (len(left) if line.find(left, 0) else len(right))
+                                self._add_file(line[idx:], line[0:1])
+
+                        else:
+                                print 'WARNING unknown line: %s' % line,
+                # done
+                infile.close()
+
+        def _add_file(self, full_path, status):
+                # split path
+                components = full_path.split('/')
+
+                # point to the begining of the tree
+                ref = self._files
+
+                # for each directory...
+                for file in components[0:-1]:
+                        # create entry if not already there
+                        if file not in ref:
+                                ref[file] = {}
+
+                        # point to the new entry
+                        ref = ref[file]
+
+                # the actual file (last component)
+                file = components[-1]
+
+                # if the file exists, change status
+                if file in ref:
+                        ref[file]['*'] = '!'
+
+                # otherwise create entry
+                else:
+                        ref[file] = {
+                                '*' : status
+                        }
+
+        def _sorted(self, list):
+                list.sort()
+                return list
+
+        def _generate_tree(self, list, indent):
+                dir_buffer  = ''
+                file_buffer = ''
+
+                # for each entry...
+                for key in self._sorted(list.keys()):
+
+                        # if this is an actual file, format it as so
+                        if '*' in list[key]:
+                                file_buffer += '%s%s %s\n' % (indent, list[key]['*'], key)
+
+                        # else get the sub entries and format as directory
+                        else:
+                                sub_buffer = self._generate_tree(list[key], indent + '\t')
+                                dir_buffer += '%s%s {{{\n%s%s}}}\n' % (indent, key, sub_buffer, indent)
+
+                # return the directories and file
+                return dir_buffer + file_buffer
+
+
+        def run(self):
+                # parse the file
+                self._parse_file()
+
+                # generate the tree
+                buffer = self._generate_tree(self._files, '')
+
+                # print the tree
+                print '%s\n# %s:fdm=marker:ts=4:ft=rs2tree:fdl=1:' % (buffer, 'vim')
+
+if __name__ == '__main__':
+        Script(sys.argv).run()

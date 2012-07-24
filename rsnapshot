@@ -1,0 +1,226 @@
+#!/bin/bash
+
+# Author: Juan D Frias
+# Version: 2.0
+# Date: 26 May 2011
+
+# check for root
+if [ "$UID" -ne "0" ]; then
+    echo "ERROR: must run as root"
+    exit 1
+fi
+
+# check type
+if [ -z "$1" ]; then
+    echo "ERROR: no interval identified"
+    exit 1
+fi
+INTERVAL=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+
+# remove interval and keep additional arguments as rsync options
+shift
+
+if [ "$INTERVAL" == "hourly" ]; then
+    HOUR=$(date +"%H")
+    if [[ $HOUR -ge 18 || $HOUR -lt 8 ]]; then
+        echo "Skipping: Not during business hours ($HOUR)"
+        exit 0
+    fi
+fi
+
+# config defined?
+if [ -z "$RSNAPSHOT_RC" ]; then
+    RSNAPSHOT_RC="$HOME/.rsnapshotrc"
+fi
+
+# check for config
+if [ ! -r "$RSNAPSHOT_RC" ]; then
+    echo "ERROR: configuration file $RSNAPSHOT_RC not found"
+    exit 2
+fi
+
+# Local config options
+#KEEP_HOURLY=15
+#KEEP_DAILY=7
+#KEEP_WEEKLY=2
+#KEEP_MONTHLY=2
+#PREFIX=full
+#BACKUP_DIR=/Backup
+#BACKUP_SOURCE="/"
+#EXCLUDE_FILE=/Users/m075878/.rsnapshot/exclude
+#RSYNC=/Users/m075878/bin/rsync
+#RSYNC_OPTS=-aHAXx
+#ROTATE=/Users/m075878/bin/plogrotate
+#DIFF=/Users/m075878/bin/rsnapshot-diff
+#TREE=/Users/m075878/bin/rsnapshot-tree
+
+# load config
+. $RSNAPSHOT_RC
+
+# num backups
+KEEP_INTERVAL=$(echo "KEEP_$INTERVAL" | tr '[:lower:]' '[:upper:]')
+NUM_BACKUPS=${!KEEP_INTERVAL}
+if [ -z "$NUM_BACKUPS" ]; then
+    INTERVAL=$(echo "$INTERVAL" | tr '[:lower:]' '[:upper:]')
+    echo "ERROR: Number of backups (KEEP_$INTERVAL) is not defined in $RSNAPSHOT_RC"
+    exit 1
+fi
+
+# additionals constants
+PID=$$
+RSNAPSHOT=rsnapshot
+PID_FILE=rsnapshot.pid
+SUFFIX_NEW=new
+SUFFIX_OLD=old
+VOLUME_FILE=.backup-volume
+LOG_DIR="$BACKUP_DIR/logs"
+
+# delete std files
+rm "$LOG_DIR/stdout.log" "$LOG_DIR/stderr.log" > /dev/null 2>&1
+
+
+log() {
+    TS=`date`
+    if [ "$1" == "--echo" ]; then
+        echo "$TS $2"
+        shift
+    fi
+    echo  "$TS: $1" >> "$LOG_DIR/$RSNAPSHOT.log"
+}
+error() {
+    log --echo "$1"
+}
+
+# start
+log  "--- Starting rsnapshot"
+
+# check for mounted volume
+if [ ! -f "$BACKUP_DIR/$VOLUME_FILE" ]; then
+    error "ERROR: backup volume is not mounted (missing $BACKUP_DIR/$VOLUME_FILE)"
+    exit 3
+fi
+log "Volume is mounted"
+
+# check to see if it is already running
+if [ -e "$LOG_DIR/$PID_FILE" ]; then
+    log "found pid, looking for process: ps -p $(cat $LOG_DIR/$PID_FILE) | grep -q /$RSNAPSHOT\$"
+    ps -p $(cat "$LOG_DIR/$PID_FILE") | grep -q "/$RSNAPSHOT\$"
+    code=$?
+    if [ $code -eq 0 ]; then
+        error "WARNING: $RSNAPSHOT already running, see $LOG_DIR/$PID_FILE"
+        exit 4
+    fi
+    error "WARNING: $RSNAPSHOT not running but PID was found, most likely crashed, delete PID file before continuing ($LOG_DIR/$PID_FILE) ..."
+    exit 5
+fi
+log "Nothing else running, Good to go"
+
+function clean_up_failed {
+    # remove failed backup
+    if [ -d "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW" ]; then
+        error "WARNING: removing incomplete backup directory (.$INTERVAL.$SUFFIX_NEW)"
+        rm -rf "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW"
+    fi
+
+    # remove failed delete
+    if [ -d "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD" ]; then
+        error "WARNING: removing old backup directory (.$INTERVAL.$SUFFIX_OLD)"
+        rm -rf "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD"
+    fi
+}
+
+function clean_up {
+    clean_up_failed
+    rm $LOG_DIR/$PID_FILE
+    exit 5
+}
+
+function kill_trap {
+    error "WARNING: SIGHUP SIGINT SIGTERM caught, cleanning up..."
+    clean_up
+    log  "--- Process killed"
+}
+
+log "Installing traps"
+trap kill_trap SIGHUP SIGINT SIGTERM
+
+# lock
+log "Creating PID file"
+mkdir -p $LOG_DIR
+echo $PID > $LOG_DIR/$PID_FILE
+
+# check for previous fails
+log "Cleaning up fails"
+clean_up_failed
+
+# sync
+log "staging dir: mkdir -p $BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW"
+mkdir -p "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW"
+for DIR in $BACKUP_SOURCE; do
+    log "backing up: $RSYNC $RSYNC_OPTS --numeric-ids --delete --exclude-from=$EXCLUDE_FILE --delete-excluded --link-dest=$BACKUP_DIR/$PREFIX.$INTERVAL.00 $* $DIR $BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW"
+    if [ ! -e "$DIR" ]; then
+        log "Directory '$DIR' does not exist, skipping"
+        continue
+    fi
+
+    $RSYNC $RSYNC_OPTS --numeric-ids --delete --exclude-from=$EXCLUDE_FILE --delete-excluded --link-dest="$BACKUP_DIR/$PREFIX.$INTERVAL.00" $* "$DIR" "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW" >> "$LOG_DIR/$RSNAPSHOT.log"
+    code=$?
+    if [ $code -ne 0 ]; then
+        log "Something went wrong... rsync($code)"
+        clean_up
+        break
+    fi
+done
+
+# shift and remove old
+log "Shifting"
+NUM_BACKUPS=$(($NUM_BACKUPS - 1))
+LAST_BACKUP=$(printf '%02d' $NUM_BACKUPS)
+for CURR in $(jot - $NUM_BACKUPS 0 -1); do
+
+    CURR_BACKUP=$(printf '%02d' $CURR)
+    if [ -d "$BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP" ]; then
+        log "found: $BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP"
+
+        # remove oldest
+        if [ $CURR_BACKUP == $LAST_BACKUP ]; then
+            log "remove old: mv $BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP $BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD"
+            mv "$BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP" "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD"
+
+        # rotate others
+        else
+            NEXT=$(($CURR + 1))
+            NEXT=$(printf '%02d' $NEXT)
+            log "rotate: mv $BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP $BACKUP_DIR/$PREFIX.$INTERVAL.$NEXT"
+            mv "$BACKUP_DIR/$PREFIX.$INTERVAL.$CURR_BACKUP" "$BACKUP_DIR/$PREFIX.$INTERVAL.$NEXT"
+        fi
+    fi
+done
+
+# move the new to 0
+log "save new: mv $BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW $BACKUP_DIR/$PREFIX.$INTERVAL.00"
+mv "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_NEW" "$BACKUP_DIR/$PREFIX.$INTERVAL.00"
+
+log "touch new: touch $BACKUP_DIR/$PREFIX.$INTERVAL.00"
+touch "$BACKUP_DIR/$PREFIX.$INTERVAL.00"
+
+# create log files
+log "rotate diff logs: $ROTATE -c $NUM_BACKUPS $LOG_DIR/$RSNAPSHOT.$PREFIX.$INTERVAL"
+$ROTATE -c $NUM_BACKUPS $LOG_DIR/$RSNAPSHOT.$PREFIX.$INTERVAL
+
+log "generate diff: $DIFF -v $BACKUP_DIR/$PREFIX.$INTERVAL.00 $BACKUP_DIR/$PREFIX.$INTERVAL.01 | $TREE - > $LOG_DIR/$RSNAPSHOT.$PREFIX.$INTERVAL"
+$DIFF -v $BACKUP_DIR/$PREFIX.$INTERVAL.00 $BACKUP_DIR/$PREFIX.$INTERVAL.01 | $TREE - > $LOG_DIR/$RSNAPSHOT.$PREFIX.$INTERVAL
+
+# remove old stuff
+if [ -d "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD" ]; then
+    log "removing old stuff: rm -rf $BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD"
+    rm -rf "$BACKUP_DIR/$PREFIX.$INTERVAL.$SUFFIX_OLD"
+fi
+
+# unlock
+log "unlock: rm $LOG_DIR/$PID_FILE"
+rm $LOG_DIR/$PID_FILE
+
+log  "--- Completed rsnapshot"
+
+exit 0

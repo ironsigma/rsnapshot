@@ -1,0 +1,22 @@
+# Local config options
+PREFIX=macys
+
+KEEP_HOURLY=15
+KEEP_DAILY=7
+KEEP_WEEKLY=2
+KEEP_MONTHLY=2
+
+BACKUP_DIR=/Backup
+BACKUP_SOURCE="/Users/m075878
+/Applications/galileo
+/Applications/MacVim.app
+/Applications/indigo
+/www
+/opt"
+
+EXCLUDE_FILE=/Users/m075878/.rsnapshot/exclude
+RSYNC=/usr/local/bin/rsync
+RSYNC_OPTS=-aHAXx
+ROTATE=/Users/m075878/bin/plogrotate
+DIFF=/Users/m075878/bin/rsnapshot-diff
+TREE=/Users/m075878/bin/rsnapshot-tree

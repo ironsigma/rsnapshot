@@ -1,0 +1,147 @@
+#!/usr/bin/env perl
+use warnings;
+use strict;
+use Getopt::Std;
+use Compress::Zlib;
+
+sub VERSION_MESSAGE { # {{{
+    print "plogrotate v1.0.1 - (C) Copyright 2011 Boxfi Software.\n";
+} # }}}
+sub HELP_MESSAGE { # {{{
+    print "Rotate lot file\n\n";
+    print "  usage: plogrotate [-s size] [-c count] <file>\n\n";
+    print "  options:\n";
+    print "    -c Number of logs to keep (default 5).\n";
+    print "    -s Minimum size before rotating (default 0 bytes)\n";
+    print "    -V Verbose messages.\n";
+    print "    -v Print version message.\n";
+    print "    -h Display this help message.\n";
+    print "\n";
+} # }}}
+sub parse_size { # {{{
+    my $size = shift @_;
+
+    if ( !defined $size ) {
+        return 0;
+    } elsif ( $size =~ /(\d+)[bB]?$/ ) {
+        return $1;
+    } elsif ( $size =~ /(\d+)[kK][bB]?$/ ) {
+        return $1 * 1000;
+    } elsif ( $size =~ /(\d+)[mM][bB]?$/ ) {
+        return $1 * 1000000;
+    } elsif ( $size =~ /(\d+)[gG][bB]?$/ ) {
+        return $1 * 1000000000;
+    }
+
+    return 0;
+} # }}}
+sub parse_args { # {{{
+    my %ops = ();
+    my $count = 5;
+    my $min_size = 0;
+    my $verbose = 0;
+
+    $Getopt::Std::STANDARD_HELP_VERSION = 1;
+    getopts("vVhs:c:", \%ops) || ( VERSION_MESSAGE && HELP_MESSAGE && exit );
+
+    if ( defined $ops{V} ) {
+        $verbose = 1;
+    }
+
+    if ( defined $ops{v} ) {
+        VERSION_MESSAGE;
+        exit 0;
+    }
+
+    if ( defined $ops{h} ) {
+        VERSION_MESSAGE;
+        HELP_MESSAGE;
+        exit 0;
+    }
+
+    if ( defined $ops{c} ) {
+        $count = $ops{c};
+        if ( $count < 1 ) {
+            print STDERR "ERROR Count must at least be one.\n";
+            exit 1;
+        }
+    }
+
+    if ( defined $ops{s} ) {
+        $min_size = parse_size $ops{s};
+        if ( $min_size < 1 ) {
+            print STDERR "ERROR Size must at least be one byte.\n";
+            exit 1;
+        }
+    }
+
+    if ( !@ARGV ) {
+        print STDERR "ERROR File not specified.\n\n";
+        VERSION_MESSAGE;
+        HELP_MESSAGE;
+        exit 1;
+    }
+
+    return ($count - 1, $min_size, $verbose, @ARGV);
+} # }}}
+sub gzip { # {{{
+    my $file = shift;
+    my $gzfile = shift;
+
+    open (FILE, $file);
+    binmode FILE;
+
+    my $buf;
+    my $by;
+    my $gz = gzopen($gzfile, "wb");
+    if ( !$gz ) {
+        return 0;
+    }
+
+    while ( $by = sysread (FILE, $buf, 4096) ) {
+        if ( !$gz->gzwrite($buf) ) {
+            return 0;
+        }
+    }
+    $gz->gzclose();
+    return 1;
+} # }}}
+sub main {
+
+    my ($count, $min_size, $verbose, $logfile) = parse_args;
+    print "keeping $count logs\n" if $verbose;
+
+    if ( !-e $logfile ) {
+        print "log file $logfile does not exist\n" if $verbose;
+        exit 0;
+    }
+    
+    if ( -s $logfile < $min_size ) {
+        print "not rolling log file $logfile, size is less than $min_size\n" if $verbose;
+        exit 0;
+    }
+
+    for ( my $num = $count; $num >=0; $num-- ) {
+        if ( -e "$logfile.$num.gz" ) {
+            if ( $num == $count ) {
+                unlink "$logfile.$num.gz" || die;
+                print "removing $logfile.$num.gz\n" if $verbose;
+            } else {
+                rename "$logfile.$num.gz", "$logfile.". ($num + 1) .".gz" || die;
+                print "rolling $logfile.$num.gz to $logfile.". ($num +1 ) .".gz\n" if $verbose;
+            }
+        }
+    }
+
+    print "compressing $logfile to $logfile.0.gz\n" if $verbose;
+    if ( !gzip($logfile, "$logfile.0.gz") ) {
+        exit 1;
+    }
+    unlink $logfile;
+}
+
+main;
+
+0;
+__END__
+# vim:fdm=marker:
